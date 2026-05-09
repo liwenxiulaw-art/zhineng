@@ -1,0 +1,24 @@
+[project]
+name = "zhineng"
+version = "0.1.0"
+description = "A-share stock tracking system backend"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115.0",
+  "sqlalchemy>=2.0.0",
+  "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.27.0",
+  "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["backend"]
+testpaths = ["backend/tests"]
+
+[tool.ruff]
+line-length = 120
+src = ["backend"]
