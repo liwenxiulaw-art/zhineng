@@ -7,7 +7,7 @@
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e '.[dev]'
+pip install -r requirements-dev.txt
 uvicorn app.main:app --reload --app-dir backend
 ```
 
@@ -35,3 +35,14 @@ uvicorn app.main:app --reload --app-dir backend
 - `PUT /api/v1/stocks/{stock_id}/research-card`：创建或更新投资逻辑卡片
 - `GET /api/v1/stocks/{stock_id}/discipline-plan`：查询交易纪律计划
 - `PUT /api/v1/stocks/{stock_id}/discipline-plan`：创建或更新交易纪律计划
+- `POST /api/v1/quotes/refresh`：刷新股票池行情
+- `GET /api/v1/quotes/latest`：查询股票池最新行情
+- `GET /api/v1/stocks/{stock_id}/quote`：查询单只股票最新行情
+- `GET /api/v1/data-sources`：查询数据源配置
+- `POST /api/v1/data-sources`：新增数据源配置
+- `GET /api/v1/data-sources/logs`：查询数据源调用日志
+- `GET /api/v1/data-sources/health`：查询数据健康检查记录
+
+## 行情模块说明
+
+当前行情模块提供离线可测试的 `mock` provider，并预留 provider 抽象以便后续接入 AKShare、Tushare、东方财富等真实数据源。每次刷新会写入行情快照、数据源调用日志和数据健康检查记录。

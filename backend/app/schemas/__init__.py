@@ -1,3 +1,12 @@
+from app.schemas.market import (
+    DataFetchLogRead,
+    DataHealthCheckRead,
+    DataSourceConfigCreate,
+    DataSourceConfigRead,
+    MarketQuoteRead,
+    QuotePayload,
+    QuoteRefreshResult,
+)
 from app.schemas.stock import (
     DisciplinePlanRead,
     DisciplinePlanUpsert,
@@ -12,7 +21,14 @@ from app.schemas.stock import (
 )
 
 __all__ = [
+    "DataFetchLogRead",
+    "DataHealthCheckRead",
+    "DataSourceConfigCreate",
+    "DataSourceConfigRead",
     "DisciplinePlanRead",
+    "MarketQuoteRead",
+    "QuotePayload",
+    "QuoteRefreshResult",
     "DisciplinePlanUpsert",
     "ResearchCardRead",
     "ResearchCardUpsert",
