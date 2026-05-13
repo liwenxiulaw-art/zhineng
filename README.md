@@ -49,9 +49,9 @@ uvicorn app.main:app --reload --app-dir backend
 
 ## 行情模块说明
 
-当前行情模块提供离线可测试的 `mock` provider，并预留 provider 抽象以便后续接入 AKShare、Tushare、东方财富等真实数据源。每次刷新会写入行情快照、数据源调用日志和数据健康检查记录。
+当前行情模块提供 `akshare` 实时行情 provider，并保留离线可测试的 `mock` provider；后续仍可继续接入 Tushare、东方财富等备用源。每次刷新会写入行情快照、数据源调用日志和数据健康检查记录。
 
-行情刷新会按 `data_source_configs.priority` 从小到大尝试启用的数据源；主源失败时会继续尝试备用源，并在返回结果和 `market_quotes.is_fallback` 中标记 fallback 状态。内置测试 provider 包括 `mock`、`failing`、`missing_price` 和 `stale`，用于离线验证主备切换与健康检查。
+行情刷新会按 `data_source_configs.priority` 从小到大尝试启用的数据源；主源失败时会继续尝试备用源，并在返回结果和 `market_quotes.is_fallback` 中标记 fallback 状态。内置 provider 包括 `akshare`、`mock`、`failing`、`missing_price` 和 `stale`，其中 `akshare` 使用 AKShare 的 `stock_zh_a_spot_em()` 获取沪深京 A 股实时行情并标准化为系统字段。
 
 ## 定时行情刷新
 
@@ -62,3 +62,13 @@ ENABLE_QUOTE_SCHEDULER=true QUOTE_REFRESH_INTERVAL_SECONDS=15 uvicorn app.main:a
 ```
 
 默认 `QUOTE_SCHEDULER_SKIP_NON_TRADING=true`，非 A 股连续竞价时段会跳过自动刷新；手动调用 `/api/v1/system/scheduler/quote-refresh/run?force=true` 可强制执行一次刷新。
+
+## AKShare 行情源
+
+安装依赖后，可以手动指定 AKShare provider 刷新行情：
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/v1/quotes/refresh?provider=akshare'
+```
+
+也可以在 `data_source_configs` 中新增 `provider=akshare`、`data_type=quote`、较小 `priority` 的配置，让定时刷新优先使用 AKShare；若主源失败，系统会继续按优先级尝试备用源。

@@ -1,4 +1,7 @@
 from datetime import UTC, datetime, timedelta
+import importlib
+import json
+from numbers import Number
 
 from app.models import Stock
 from app.schemas import QuotePayload
@@ -15,6 +18,84 @@ class QuoteProvider:
 
     def fetch_quotes(self, stocks: list[Stock]) -> list[QuotePayload]:
         raise NotImplementedError
+
+
+def _is_missing(value: object) -> bool:
+    return value is None or value == "-" or value == ""
+
+
+def _to_float(value: object) -> float | None:
+    if _is_missing(value):
+        return None
+    if isinstance(value, Number):
+        # NaN is the only common numeric value that is not equal to itself.
+        return None if value != value else float(value)
+    try:
+        text = str(value).replace(",", "").strip()
+        return None if text == "" else float(text)
+    except ValueError:
+        return None
+
+
+def _to_code(value: object) -> str:
+    return str(value).strip().split(".")[0].zfill(6)
+
+
+def _row_to_dict(row: object) -> dict[str, object]:
+    if hasattr(row, "to_dict"):
+        return row.to_dict()
+    return dict(row)  # type: ignore[arg-type]
+
+
+def _raw_json(row_data: dict[str, object]) -> str:
+    def default(value: object) -> str:
+        return str(value)
+
+    return json.dumps(row_data, ensure_ascii=False, default=default)
+
+
+class AkshareQuoteProvider(QuoteProvider):
+    """AKShare realtime A-share quote provider.
+
+    Uses ak.stock_zh_a_spot_em(), which returns the current Shanghai/Shenzhen/Beijing
+    A-share quote table from Eastmoney. The provider filters the full table down to
+    the requested stock pool and normalizes Chinese columns into QuotePayload.
+    """
+
+    name = "akshare"
+
+    def fetch_quotes(self, stocks: list[Stock]) -> list[QuotePayload]:
+        akshare = importlib.import_module("akshare")
+        spot_df = akshare.stock_zh_a_spot_em()
+        requested_by_code = {_to_code(stock.code): stock for stock in stocks}
+        now = datetime.now(UTC).replace(tzinfo=None)
+        payloads: list[QuotePayload] = []
+
+        for _, row in spot_df.iterrows():
+            row_data = _row_to_dict(row)
+            code = _to_code(row_data.get("代码"))
+            stock = requested_by_code.get(code)
+            if stock is None:
+                continue
+            payloads.append(
+                QuotePayload(
+                    symbol=stock.symbol,
+                    trade_date=now.date(),
+                    quote_time=now,
+                    price=_to_float(row_data.get("最新价")),
+                    change_amount=_to_float(row_data.get("涨跌额")),
+                    change_pct=_to_float(row_data.get("涨跌幅")),
+                    volume=_to_float(row_data.get("成交量")),
+                    amount=_to_float(row_data.get("成交额")),
+                    turnover_rate=_to_float(row_data.get("换手率")),
+                    volume_ratio=_to_float(row_data.get("量比")),
+                    pe=_to_float(row_data.get("市盈率-动态")),
+                    total_market_cap=_to_float(row_data.get("总市值")),
+                    float_market_cap=_to_float(row_data.get("流通市值")),
+                    raw_data=_raw_json(row_data),
+                )
+            )
+        return payloads
 
 
 class MockQuoteProvider(QuoteProvider):
@@ -98,6 +179,7 @@ class StaleQuoteProvider(QuoteProvider):
 
 
 PROVIDERS: dict[str, type[QuoteProvider]] = {
+    AkshareQuoteProvider.name: AkshareQuoteProvider,
     FailingQuoteProvider.name: FailingQuoteProvider,
     MissingPriceQuoteProvider.name: MissingPriceQuoteProvider,
     MockQuoteProvider.name: MockQuoteProvider,

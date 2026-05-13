@@ -198,3 +198,109 @@ def test_unknown_quote_provider_returns_400(client: TestClient) -> None:
     response = client.post("/api/v1/quotes/refresh?provider=unknown")
     assert response.status_code == 400
     assert "未知行情数据源" in response.json()["detail"]
+
+
+def test_akshare_provider_normalizes_spot_dataframe(monkeypatch) -> None:
+    import sys
+    import types
+
+    import pandas as pd
+
+    from app.models import Stock
+    from app.providers.quote import AkshareQuoteProvider
+
+    fake_akshare = types.SimpleNamespace(
+        stock_zh_a_spot_em=lambda: pd.DataFrame(
+            [
+                {
+                    "代码": "000001",
+                    "名称": "平安银行",
+                    "最新价": 11.23,
+                    "涨跌幅": 1.25,
+                    "涨跌额": 0.14,
+                    "成交量": 100000,
+                    "成交额": 123456789,
+                    "换手率": 0.88,
+                    "量比": 1.12,
+                    "市盈率-动态": 6.5,
+                    "总市值": 217000000000,
+                    "流通市值": 216000000000,
+                },
+                {
+                    "代码": "600519",
+                    "名称": "贵州茅台",
+                    "最新价": 1688.0,
+                    "涨跌幅": -0.5,
+                    "涨跌额": -8.5,
+                    "成交量": 20000,
+                    "成交额": 3380000000,
+                    "换手率": 0.16,
+                    "量比": 0.92,
+                    "市盈率-动态": 28.0,
+                    "总市值": 2120000000000,
+                    "流通市值": 2120000000000,
+                },
+            ]
+        )
+    )
+    monkeypatch.setitem(sys.modules, "akshare", fake_akshare)
+
+    stocks = [
+        Stock(code="000001", exchange="SZ", symbol="000001.SZ", name="平安银行"),
+        Stock(code="600519", exchange="SH", symbol="600519.SH", name="贵州茅台"),
+    ]
+
+    payloads = AkshareQuoteProvider().fetch_quotes(stocks)
+
+    assert [payload.symbol for payload in payloads] == ["000001.SZ", "600519.SH"]
+    assert payloads[0].price == 11.23
+    assert payloads[0].change_pct == 1.25
+    assert payloads[0].amount == 123456789
+    assert payloads[0].turnover_rate == 0.88
+    assert payloads[0].pe == 6.5
+    assert payloads[0].total_market_cap == 217000000000
+    assert "平安银行" in (payloads[0].raw_data or "")
+
+
+def test_akshare_provider_can_be_used_by_quote_refresh(monkeypatch, client: TestClient) -> None:
+    import sys
+    import types
+
+    import pandas as pd
+
+    fake_akshare = types.SimpleNamespace(
+        stock_zh_a_spot_em=lambda: pd.DataFrame(
+            [
+                {
+                    "代码": "000001",
+                    "名称": "平安银行",
+                    "最新价": 11.23,
+                    "涨跌幅": 1.25,
+                    "涨跌额": 0.14,
+                    "成交量": 100000,
+                    "成交额": 123456789,
+                    "换手率": 0.88,
+                    "量比": 1.12,
+                    "市盈率-动态": 6.5,
+                    "总市值": 217000000000,
+                    "流通市值": 216000000000,
+                }
+            ]
+        )
+    )
+    monkeypatch.setitem(sys.modules, "akshare", fake_akshare)
+
+    stock_response = client.post("/api/v1/stocks", json={"code": "000001", "exchange": "SZ", "name": "平安银行"})
+    assert stock_response.status_code == 201
+
+    refresh_response = client.post("/api/v1/quotes/refresh?provider=akshare")
+    assert refresh_response.status_code == 200
+    assert refresh_response.json()["provider"] == "akshare"
+    assert refresh_response.json()["refreshed_count"] == 1
+
+    latest_response = client.get("/api/v1/quotes/latest")
+    assert latest_response.status_code == 200
+    latest_quote = latest_response.json()[0]
+    assert latest_quote["source"] == "akshare"
+    assert latest_quote["price"] == 11.23
+    assert latest_quote["data_status"] == "normal"

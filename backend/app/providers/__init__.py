@@ -1,4 +1,5 @@
 from app.providers.quote import (
+    AkshareQuoteProvider,
     FailingQuoteProvider,
     MissingPriceQuoteProvider,
     MockQuoteProvider,
@@ -8,6 +9,7 @@ from app.providers.quote import (
 )
 
 __all__ = [
+    "AkshareQuoteProvider",
     "FailingQuoteProvider",
     "MissingPriceQuoteProvider",
     "MockQuoteProvider",
