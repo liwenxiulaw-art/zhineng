@@ -42,9 +42,23 @@ uvicorn app.main:app --reload --app-dir backend
 - `POST /api/v1/data-sources`：新增数据源配置
 - `GET /api/v1/data-sources/logs`：查询数据源调用日志
 - `GET /api/v1/data-sources/health`：查询数据健康检查记录
+- `GET /api/v1/system/scheduler`：查询定时任务状态
+- `POST /api/v1/system/scheduler/start`：启动定时任务
+- `POST /api/v1/system/scheduler/stop`：停止定时任务
+- `POST /api/v1/system/scheduler/quote-refresh/run`：立即执行一次行情刷新任务
 
 ## 行情模块说明
 
 当前行情模块提供离线可测试的 `mock` provider，并预留 provider 抽象以便后续接入 AKShare、Tushare、东方财富等真实数据源。每次刷新会写入行情快照、数据源调用日志和数据健康检查记录。
 
 行情刷新会按 `data_source_configs.priority` 从小到大尝试启用的数据源；主源失败时会继续尝试备用源，并在返回结果和 `market_quotes.is_fallback` 中标记 fallback 状态。内置测试 provider 包括 `mock`、`failing`、`missing_price` 和 `stale`，用于离线验证主备切换与健康检查。
+
+## 定时行情刷新
+
+系统集成 APScheduler。默认 `ENABLE_QUOTE_SCHEDULER=false`，启动服务时只注册任务但不自动运行；可通过环境变量启用自动刷新：
+
+```bash
+ENABLE_QUOTE_SCHEDULER=true QUOTE_REFRESH_INTERVAL_SECONDS=15 uvicorn app.main:app --reload --app-dir backend
+```
+
+默认 `QUOTE_SCHEDULER_SKIP_NON_TRADING=true`，非 A 股连续竞价时段会跳过自动刷新；手动调用 `/api/v1/system/scheduler/quote-refresh/run?force=true` 可强制执行一次刷新。

@@ -16,6 +16,7 @@ class Settings:
     quote_stale_seconds: int = int(os.getenv("QUOTE_STALE_SECONDS", "300"))
     quote_refresh_interval_seconds: int = int(os.getenv("QUOTE_REFRESH_INTERVAL_SECONDS", "15"))
     enable_quote_scheduler: bool = os.getenv("ENABLE_QUOTE_SCHEDULER", "false").lower() in {"1", "true", "yes"}
+    quote_scheduler_skip_non_trading: bool = os.getenv("QUOTE_SCHEDULER_SKIP_NON_TRADING", "true").lower() in {"1", "true", "yes"}
 
 
 @lru_cache

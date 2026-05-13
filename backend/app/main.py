@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from app.api.v1 import api_router
 from app.core.config import get_settings
 from app.core.database import create_db_and_tables
+from app.tasks.scheduler import start_scheduler_if_enabled, stop_scheduler
 
 settings = get_settings()
 
@@ -13,7 +14,11 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     create_db_and_tables()
-    yield
+    start_scheduler_if_enabled()
+    try:
+        yield
+    finally:
+        stop_scheduler()
 
 
 app = FastAPI(
