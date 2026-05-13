@@ -13,6 +13,9 @@ class Settings:
         f"sqlite:///{Path(__file__).resolve().parents[3] / 'data' / 'app.db'}",
     )
     echo_sql: bool = os.getenv("ECHO_SQL", "false").lower() in {"1", "true", "yes"}
+    quote_stale_seconds: int = int(os.getenv("QUOTE_STALE_SECONDS", "300"))
+    quote_refresh_interval_seconds: int = int(os.getenv("QUOTE_REFRESH_INTERVAL_SECONDS", "15"))
+    enable_quote_scheduler: bool = os.getenv("ENABLE_QUOTE_SCHEDULER", "false").lower() in {"1", "true", "yes"}
 
 
 @lru_cache

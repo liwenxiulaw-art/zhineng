@@ -114,6 +114,7 @@ class QuoteRefreshResult(BaseModel):
     refreshed_count: int
     failed_symbols: list[str] = Field(default_factory=list)
     fetch_log_id: int | None = None
+    attempted_providers: list[str] = Field(default_factory=list)
 
 
 class QuoteHealthIssue(BaseModel):

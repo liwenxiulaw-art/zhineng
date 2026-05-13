@@ -46,3 +46,5 @@ uvicorn app.main:app --reload --app-dir backend
 ## 行情模块说明
 
 当前行情模块提供离线可测试的 `mock` provider，并预留 provider 抽象以便后续接入 AKShare、Tushare、东方财富等真实数据源。每次刷新会写入行情快照、数据源调用日志和数据健康检查记录。
+
+行情刷新会按 `data_source_configs.priority` 从小到大尝试启用的数据源；主源失败时会继续尝试备用源，并在返回结果和 `market_quotes.is_fallback` 中标记 fallback 状态。内置测试 provider 包括 `mock`、`failing`、`missing_price` 和 `stale`，用于离线验证主备切换与健康检查。

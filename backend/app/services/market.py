@@ -1,71 +1,15 @@
 from datetime import UTC, datetime
+
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models import DataFetchLog, DataHealthCheck, DataSourceConfig, MarketQuote, Stock
+from app.providers import get_provider
 from app.schemas import DataSourceConfigCreate, QuotePayload
 from app.schemas.market import QuoteHealthIssue, QuoteRefreshResult
 
-
-class QuoteProvider:
-    name = "base"
-    priority = 100
-
-    def fetch_quotes(self, stocks: list[Stock]) -> list[QuotePayload]:
-        raise NotImplementedError
-
-
-class MockQuoteProvider(QuoteProvider):
-    """Deterministic local quote provider for tests and offline development."""
-
-    name = "mock"
-    priority = 100
-
-    def fetch_quotes(self, stocks: list[Stock]) -> list[QuotePayload]:
-        now = datetime.now(UTC).replace(tzinfo=None)
-        payloads: list[QuotePayload] = []
-        for index, stock in enumerate(stocks, start=1):
-            base_price = 10 + index
-            payloads.append(
-                QuotePayload(
-                    symbol=stock.symbol,
-                    trade_date=now.date(),
-                    quote_time=now,
-                    price=round(base_price, 2),
-                    change_amount=round(index * 0.03, 2),
-                    change_pct=round(index * 0.25, 2),
-                    volume=float(index * 10000),
-                    amount=float(index * 1000000),
-                    turnover_rate=round(index * 0.4, 2),
-                    volume_ratio=round(1 + index * 0.05, 2),
-                    pe=round(15 + index * 0.2, 2),
-                    total_market_cap=float(index * 10_000_000_000),
-                    float_market_cap=float(index * 8_000_000_000),
-                    raw_data=f'{{"provider":"mock","symbol":"{stock.symbol}"}}',
-                )
-            )
-        return payloads
-
-
-class FailingQuoteProvider(QuoteProvider):
-    name = "failing"
-    priority = 100
-
-    def fetch_quotes(self, stocks: list[Stock]) -> list[QuotePayload]:
-        raise RuntimeError("模拟数据源失败")
-
-
-PROVIDERS: dict[str, type[QuoteProvider]] = {
-    MockQuoteProvider.name: MockQuoteProvider,
-    FailingQuoteProvider.name: FailingQuoteProvider,
-}
-
-
-def get_provider(name: str) -> QuoteProvider:
-    provider_class = PROVIDERS.get(name)
-    if provider_class is None:
-        raise ValueError(f"未知行情数据源：{name}")
-    return provider_class()
+settings = get_settings()
 
 
 def list_data_source_configs(db: Session, *, data_type: str | None = None) -> list[DataSourceConfig]:
@@ -99,15 +43,53 @@ def ensure_default_quote_source(db: Session) -> DataSourceConfig:
     return config
 
 
-def _quote_health(payload: QuotePayload) -> QuoteHealthIssue:
+def get_quote_source_candidates(db: Session, *, provider_name: str | None = None) -> list[DataSourceConfig]:
+    if provider_name is not None:
+        get_provider(provider_name)
+        return [DataSourceConfig(provider=provider_name, data_type="quote", priority=0, is_enabled=True)]
+
+    ensure_default_quote_source(db)
+    return list(
+        db.scalars(
+            select(DataSourceConfig)
+            .where(DataSourceConfig.data_type == "quote", DataSourceConfig.is_enabled.is_(True))
+            .order_by(DataSourceConfig.priority.asc(), DataSourceConfig.id.asc())
+        )
+    )
+
+
+def _quote_health(payload: QuotePayload, *, expected_symbol: str, now: datetime | None = None) -> QuoteHealthIssue:
+    current_time = now or datetime.now(UTC).replace(tzinfo=None)
+    if payload.symbol != expected_symbol:
+        return QuoteHealthIssue(
+            status="abnormal",
+            issue_type="symbol_mismatch",
+            issue_detail=f"返回代码 {payload.symbol} 与请求代码 {expected_symbol} 不一致",
+        )
     if payload.price is None:
         return QuoteHealthIssue(status="abnormal", issue_type="price_missing", issue_detail="当前价为空")
     if payload.price <= 0:
         return QuoteHealthIssue(status="abnormal", issue_type="price_invalid", issue_detail="当前价小于或等于 0")
+    if payload.change_pct is not None and abs(payload.change_pct) > 35:
+        return QuoteHealthIssue(status="abnormal", issue_type="change_pct_outlier", issue_detail="涨跌幅超出合理校验阈值")
     if payload.quote_time is None:
         return QuoteHealthIssue(status="partial", issue_type="timestamp_missing", issue_detail="行情时间为空")
+    age_seconds = (current_time - payload.quote_time).total_seconds()
+    if age_seconds > settings.quote_stale_seconds:
+        return QuoteHealthIssue(status="stale", issue_type="timestamp_stale", issue_detail="行情时间超过 stale 阈值")
+    missing_fields = []
     if payload.change_pct is None:
-        return QuoteHealthIssue(status="partial", issue_type="field_missing", issue_detail="涨跌幅为空")
+        missing_fields.append("change_pct")
+    if payload.volume is None:
+        missing_fields.append("volume")
+    if payload.amount is None:
+        missing_fields.append("amount")
+    if missing_fields:
+        return QuoteHealthIssue(
+            status="partial",
+            issue_type="field_missing",
+            issue_detail=f"关键字段缺失：{', '.join(missing_fields)}",
+        )
     return QuoteHealthIssue(status="normal")
 
 
@@ -143,6 +125,92 @@ def _write_fetch_log(
     return log
 
 
+def _persist_quote_payloads(
+    db: Session,
+    *,
+    stocks: list[Stock],
+    payloads: list[QuotePayload],
+    provider_name: str,
+    source_priority: int,
+    is_fallback: bool,
+) -> tuple[int, list[str], list[str]]:
+    payload_by_symbol = {payload.symbol: payload for payload in payloads}
+    refreshed_count = 0
+    failed_symbols: list[str] = []
+    statuses: list[str] = []
+    now = datetime.now(UTC).replace(tzinfo=None)
+
+    for stock in stocks:
+        payload = payload_by_symbol.get(stock.symbol)
+        if payload is None:
+            failed_symbols.append(stock.symbol)
+            db.add(
+                DataHealthCheck(
+                    data_type="quote",
+                    stock_id=stock.id,
+                    provider=provider_name,
+                    status="missing",
+                    issue_type="quote_missing",
+                    issue_detail="数据源未返回该股票行情",
+                )
+            )
+            statuses.append("missing")
+            continue
+
+        issue = _quote_health(payload, expected_symbol=stock.symbol, now=now)
+        db.add(
+            MarketQuote(
+                stock_id=stock.id,
+                trade_date=payload.trade_date,
+                quote_time=payload.quote_time,
+                price=payload.price,
+                change_amount=payload.change_amount,
+                change_pct=payload.change_pct,
+                volume=payload.volume,
+                amount=payload.amount,
+                turnover_rate=payload.turnover_rate,
+                volume_ratio=payload.volume_ratio,
+                pe=payload.pe,
+                total_market_cap=payload.total_market_cap,
+                float_market_cap=payload.float_market_cap,
+                source=provider_name,
+                source_priority=source_priority,
+                is_fallback=is_fallback,
+                data_status=issue.status,
+                abnormal_reason=issue.issue_detail,
+                raw_data=payload.raw_data,
+            )
+        )
+        db.add(
+            DataHealthCheck(
+                data_type="quote",
+                stock_id=stock.id,
+                provider=provider_name,
+                status=issue.status,
+                issue_type=issue.issue_type,
+                issue_detail=issue.issue_detail,
+                last_valid_data_at=payload.quote_time if issue.status == "normal" else None,
+            )
+        )
+        refreshed_count += 1
+        statuses.append(issue.status)
+
+    db.commit()
+    return refreshed_count, failed_symbols, statuses
+
+
+def _overall_status(statuses: list[str], refreshed_count: int) -> str:
+    if refreshed_count == 0:
+        return "missing"
+    if statuses and all(status == "normal" for status in statuses):
+        return "normal"
+    if any(status == "abnormal" for status in statuses):
+        return "abnormal"
+    if any(status == "stale" for status in statuses):
+        return "stale"
+    return "partial"
+
+
 def refresh_quotes(db: Session, *, provider_name: str | None = None) -> QuoteRefreshResult:
     stocks = list(db.scalars(select(Stock).where(Stock.is_active.is_(True)).order_by(Stock.id.asc())))
     if not stocks:
@@ -155,117 +223,78 @@ def refresh_quotes(db: Session, *, provider_name: str | None = None) -> QuoteRef
             started_at=datetime.now(UTC).replace(tzinfo=None),
             records_count=0,
         )
-        return QuoteRefreshResult(provider=log.provider, is_fallback=False, data_status="missing", refreshed_count=0, fetch_log_id=log.id)
-
-    config = ensure_default_quote_source(db)
-    selected_provider = provider_name or config.provider
-    provider = get_provider(selected_provider)
-    request_key = ",".join(stock.symbol for stock in stocks)
-    started_at = datetime.now(UTC).replace(tzinfo=None)
-    try:
-        payloads = provider.fetch_quotes(stocks)
-    except Exception as exc:
-        log = _write_fetch_log(
-            db,
-            provider=selected_provider,
-            endpoint="fetch_quotes",
-            request_key=request_key,
-            status="failed",
-            started_at=started_at,
-            records_count=0,
-            error_message=str(exc),
-        )
         return QuoteRefreshResult(
-            provider=selected_provider,
+            provider=log.provider,
             is_fallback=False,
-            data_status="abnormal",
+            data_status="missing",
             refreshed_count=0,
-            failed_symbols=[stock.symbol for stock in stocks],
             fetch_log_id=log.id,
+            attempted_providers=[log.provider],
         )
 
-    payload_by_symbol = {payload.symbol: payload for payload in payloads}
-    refreshed_count = 0
-    failed_symbols: list[str] = []
-    statuses: list[str] = []
+    candidates = get_quote_source_candidates(db, provider_name=provider_name)
+    request_key = ",".join(stock.symbol for stock in stocks)
+    attempted_providers: list[str] = []
+    failed_symbols = [stock.symbol for stock in stocks]
+    last_log: DataFetchLog | None = None
 
-    for stock in stocks:
-        payload = payload_by_symbol.get(stock.symbol)
-        if payload is None:
-            failed_symbols.append(stock.symbol)
-            health = DataHealthCheck(
-                data_type="quote",
-                stock_id=stock.id,
+    for index, config in enumerate(candidates):
+        provider = get_provider(config.provider)
+        attempted_providers.append(provider.name)
+        started_at = datetime.now(UTC).replace(tzinfo=None)
+        used_fallback = index > 0
+        try:
+            payloads = provider.fetch_quotes(stocks)
+        except Exception as exc:
+            last_log = _write_fetch_log(
+                db,
                 provider=provider.name,
-                status="missing",
-                issue_type="quote_missing",
-                issue_detail="数据源未返回该股票行情",
+                endpoint="fetch_quotes",
+                request_key=request_key,
+                status="failed",
+                started_at=started_at,
+                records_count=0,
+                used_fallback=used_fallback,
+                error_message=str(exc),
             )
-            db.add(health)
-            statuses.append("missing")
             continue
 
-        issue = _quote_health(payload)
-        quote = MarketQuote(
-            stock_id=stock.id,
-            trade_date=payload.trade_date,
-            quote_time=payload.quote_time,
-            price=payload.price,
-            change_amount=payload.change_amount,
-            change_pct=payload.change_pct,
-            volume=payload.volume,
-            amount=payload.amount,
-            turnover_rate=payload.turnover_rate,
-            volume_ratio=payload.volume_ratio,
-            pe=payload.pe,
-            total_market_cap=payload.total_market_cap,
-            float_market_cap=payload.float_market_cap,
-            source=provider.name,
+        refreshed_count, failed_symbols, statuses = _persist_quote_payloads(
+            db,
+            stocks=stocks,
+            payloads=payloads,
+            provider_name=provider.name,
             source_priority=config.priority,
-            is_fallback=False,
-            data_status=issue.status,
-            abnormal_reason=issue.issue_detail,
-            raw_data=payload.raw_data,
+            is_fallback=used_fallback,
         )
-        db.add(quote)
-        db.flush()
-
-        db.add(
-            DataHealthCheck(
-                data_type="quote",
-                stock_id=stock.id,
-                provider=provider.name,
-                status=issue.status,
-                issue_type=issue.issue_type,
-                issue_detail=issue.issue_detail,
-                last_valid_data_at=payload.quote_time if issue.status == "normal" else None,
-            )
+        last_log = _write_fetch_log(
+            db,
+            provider=provider.name,
+            endpoint="fetch_quotes",
+            request_key=request_key,
+            status="fallback" if used_fallback else "success",
+            started_at=started_at,
+            records_count=refreshed_count,
+            used_fallback=used_fallback,
         )
-        refreshed_count += 1
-        statuses.append(issue.status)
+        return QuoteRefreshResult(
+            provider=provider.name,
+            is_fallback=used_fallback,
+            data_status=_overall_status(statuses, refreshed_count),
+            refreshed_count=refreshed_count,
+            failed_symbols=failed_symbols,
+            fetch_log_id=last_log.id,
+            attempted_providers=attempted_providers,
+        )
 
-    db.commit()
-    log = _write_fetch_log(
-        db,
-        provider=provider.name,
-        endpoint="fetch_quotes",
-        request_key=request_key,
-        status="success" if not failed_symbols else "fallback",
-        started_at=started_at,
-        records_count=refreshed_count,
-        used_fallback=False,
-    )
-
-    overall_status = "normal" if statuses and all(status == "normal" for status in statuses) else "partial"
-    if refreshed_count == 0:
-        overall_status = "missing"
     return QuoteRefreshResult(
-        provider=provider.name,
-        is_fallback=False,
-        data_status=overall_status,
-        refreshed_count=refreshed_count,
+        provider=attempted_providers[-1] if attempted_providers else "none",
+        is_fallback=len(attempted_providers) > 1,
+        data_status="abnormal",
+        refreshed_count=0,
         failed_symbols=failed_symbols,
-        fetch_log_id=log.id,
+        fetch_log_id=last_log.id if last_log is not None else None,
+        attempted_providers=attempted_providers,
     )
 
 
